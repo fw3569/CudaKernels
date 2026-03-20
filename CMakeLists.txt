@@ -12,7 +12,8 @@ set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ProgramDatabase)
 add_executable(
   proj
   src/main.cpp
-  src/gemm_kernel.cu
+  src/kernel/gemm_kernel.cu
+  src/kernel/transpose_kernel.cu
 )
 target_include_directories(proj PRIVATE ./include)
 find_package(CUDAToolkit REQUIRED)

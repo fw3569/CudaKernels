@@ -8,20 +8,22 @@
 #include <vector>
 
 #include "gemm_kernel.cuh"
+#include "transpose_kernel.cuh"
 
 // params for gen test data
-#define ROW_NUM 1024
-#define COL_NUM 1024
+#define ROW_NUM 4096
+#define COL_NUM 4096
 #define MID_NUM 1024
 #define VALUE_MAX 100.0f
 
-int compare_result(float c[ROW_NUM][COL_NUM],
-                   float ground_truth[ROW_NUM][COL_NUM]) {
-  for (int i = 0; i < ROW_NUM; ++i) {
-    for (int j = 0; j < COL_NUM; ++j) {
-      if (!std::isfinite(c[i][j]) || !std::isfinite(ground_truth[i][j]) ||
-          fabs(c[i][j] - ground_truth[i][j]) >=
-              1e-4 * std::max(fabs(c[i][j]), fabs(ground_truth[i][j]))) {
+int compare_result(float* c, float* ground_truth, int N, int M) {
+  for (int i = 0; i < N; ++i) {
+    for (int j = 0; j < M; ++j) {
+      if (!std::isfinite(c[i * M + j]) ||
+          !std::isfinite(ground_truth[i * M + j]) ||
+          fabs(c[i * M + j] - ground_truth[i * M + j]) >=
+              1e-4 *
+                  std::max(fabs(c[i * M + j]), fabs(ground_truth[i * M + j]))) {
         return 1;
       }
     }
@@ -29,15 +31,10 @@ int compare_result(float c[ROW_NUM][COL_NUM],
   return 0;
 }
 
-void generate_tset_data(float a[ROW_NUM][MID_NUM], float b[MID_NUM][COL_NUM]) {
-  for (int i = 0; i < ROW_NUM; ++i) {
-    for (int j = 0; j < MID_NUM; ++j) {
-      a[i][j] = double(rand()) / RAND_MAX * VALUE_MAX - (VALUE_MAX / 2);
-    }
-  }
-  for (int i = 0; i < MID_NUM; ++i) {
-    for (int j = 0; j < COL_NUM; ++j) {
-      b[i][j] = double(rand()) / RAND_MAX * VALUE_MAX - (VALUE_MAX / 2);
+void generate_tset_data(float* a, int N, int M) {
+  for (int i = 0; i < N; ++i) {
+    for (int j = 0; j < M; ++j) {
+      a[i * M + j] = float(rand()) / RAND_MAX * VALUE_MAX - (VALUE_MAX / 2);
     }
   }
 }
@@ -74,13 +71,13 @@ class exit_guard {
     }                                                   \
   }
 
-float a[ROW_NUM][MID_NUM], b[MID_NUM][COL_NUM], c[ROW_NUM][COL_NUM],
-    ground_truth[ROW_NUM][COL_NUM];
+float a[ROW_NUM][COL_NUM], b[ROW_NUM][COL_NUM], c[COL_NUM][ROW_NUM],
+    ground_truth[COL_NUM][ROW_NUM];
 float *dev_a, *dev_b, *dev_c;
 
 int main() {
   srand(time(NULL));
-  generate_tset_data(a, b);
+  generate_tset_data(a[0], ROW_NUM, COL_NUM);
   CHECK_CUDA_WITH_CLEANUP(cudaMalloc(&dev_a, sizeof(a)),
                           []() -> void { cudaFree(dev_a); });
   CHECK_CUDA_WITH_CLEANUP(cudaMalloc(&dev_b, sizeof(b)),
@@ -97,12 +94,12 @@ int main() {
   });
   cudaEventRecord(start);
   CHECK_CUDA(cudaMemcpy(dev_a, a, sizeof(a), cudaMemcpyHostToDevice));
-  CHECK_CUDA(cudaMemcpy(dev_b, b, sizeof(b), cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemset(dev_b, 0, sizeof(b)));
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_memcpy_in, start, stop);
   cudaEventRecord(start);
-  gemm(dev_a, dev_b, dev_c, ROW_NUM, COL_NUM, MID_NUM);
+  transpose(dev_a, dev_c, ROW_NUM, COL_NUM);
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_kernel, start, stop);
@@ -118,26 +115,24 @@ int main() {
   float beta = 0.0f;
   float time_ms_cublas_kernel;
   cudaEventRecord(start);
-  cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, COL_NUM, ROW_NUM,
-              MID_NUM, &alpha, dev_b, COL_NUM, dev_a, MID_NUM, &beta, dev_c,
-              COL_NUM);
+  cublasSgeam(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, ROW_NUM, COL_NUM, &alpha,
+              dev_a, COL_NUM, &beta, dev_b, ROW_NUM, dev_c, ROW_NUM);
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_cublas_kernel, start, stop);
   CHECK_CUDA(cudaMemcpy(ground_truth, dev_c, sizeof(ground_truth),
                         cudaMemcpyDeviceToHost));
 
-  // cudaDeviceSynchronize();
-  if (compare_result(c, ground_truth) == 0) {
+  if (compare_result(c[0], ground_truth[0], COL_NUM, ROW_NUM) == 0) {
     std::cout << "ok" << std::endl;
     for (int i = 0; i < 10; ++i) {
-      gemm(dev_a, dev_b, dev_c, ROW_NUM, COL_NUM, MID_NUM);
+      transpose(dev_a, dev_c, ROW_NUM, COL_NUM);
     }
     time_ms_kernel = 0.0f;
     for (int i = 0; i < 100; ++i) {
       float time_ms;
       cudaEventRecord(start);
-      gemm(dev_a, dev_b, dev_c, ROW_NUM, COL_NUM, MID_NUM);
+      transpose(dev_a, dev_c, ROW_NUM, COL_NUM);
       cudaEventRecord(stop);
       cudaEventSynchronize(stop);
       cudaEventElapsedTime(&time_ms, start, stop);
@@ -145,28 +140,26 @@ int main() {
     }
     time_ms_kernel /= 100;
     for (int i = 0; i < 10; ++i) {
-      cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, COL_NUM, ROW_NUM,
-                  MID_NUM, &alpha, dev_b, COL_NUM, dev_a, MID_NUM, &beta, dev_c,
-                  COL_NUM);
+      cublasSgeam(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, ROW_NUM, COL_NUM,
+                  &alpha, dev_a, COL_NUM, &beta, dev_b, ROW_NUM, dev_c,
+                  ROW_NUM);
     }
     time_ms_cublas_kernel = 0.0f;
     for (int i = 0; i < 100; ++i) {
       float time_ms;
       cudaEventRecord(start);
-      cublasSgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, COL_NUM, ROW_NUM,
-                  MID_NUM, &alpha, dev_b, COL_NUM, dev_a, MID_NUM, &beta, dev_c,
-                  COL_NUM);
+      cublasSgeam(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, ROW_NUM, COL_NUM,
+                  &alpha, dev_a, COL_NUM, &beta, dev_b, ROW_NUM, dev_c,
+                  ROW_NUM);
       cudaEventRecord(stop);
       cudaEventSynchronize(stop);
       cudaEventElapsedTime(&time_ms, start, stop);
       time_ms_cublas_kernel += time_ms;
     }
     time_ms_cublas_kernel /= 100;
-    float tflops =
-        (2.0 * ROW_NUM * COL_NUM * MID_NUM) / (time_ms_kernel * 1e-3) / 1e12;
     std::cout << "kernel time : " << time_ms_kernel << "ms, total time: "
-              << time_ms_memcpy_in + time_ms_kernel + time_ms_memcpy_out
-              << "ms, tflops: " << tflops << std::endl;
+              << time_ms_memcpy_in + time_ms_kernel + time_ms_memcpy_out << "ms"
+              << std::endl;
     std::cout << "cublas kernel time: " << time_ms_cublas_kernel
               << "ms, rate: " << time_ms_cublas_kernel / time_ms_kernel
               << std::endl;
