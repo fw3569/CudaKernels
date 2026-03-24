@@ -12,6 +12,7 @@ set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ProgramDatabase)
 add_executable(
   proj
   src/main.cpp
+  src/kernel/geam_kernel.cu
   src/kernel/asum_kernel.cu
   src/kernel/gemm_kernel.cu
   src/kernel/transpose_kernel.cu

@@ -18,3 +18,9 @@ reduce asum
 kernel time : 6.85669ms, total time: 100.241ms
 cublas kernel time: 7.6023ms, rate: 1.10874
 ```
+
+elementwise geam
+```
+kernel time : 2.75101ms, total time: 51.1646ms
+cublas kernel time: 2.78894ms, rate: 1.01379
+```
