@@ -1,5 +1,6 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <cudnn.h>
 #include <device_launch_parameters.h>
 
 #include <functional>
@@ -10,11 +11,12 @@
 #include "asum_kernel.cuh"
 #include "geam_kernel.cuh"
 #include "gemm_kernel.cuh"
+#include "softmax_kernel.cuh"
 #include "transpose_kernel.cuh"
 
 // params for gen test data
-#define ROW_NUM 4096
-#define COL_NUM 4096
+#define ROW_NUM 1
+#define COL_NUM (1024 * 32)
 #define MID_NUM 1024
 #define VALUE_MAX 100.0f
 #define EPS 1e-4f
@@ -82,11 +84,8 @@ float *d_a, *d_b, *d_output;
 int main() {
   srand(time(NULL));
   generate_tset_data(a[0], ROW_NUM, COL_NUM);
-  generate_tset_data(b[0], ROW_NUM, COL_NUM);
   CHECK_CUDA_WITH_CLEANUP(cudaMalloc(&d_a, sizeof(a)),
                           []() -> void { cudaFree(d_a); });
-  CHECK_CUDA_WITH_CLEANUP(cudaMalloc(&d_b, sizeof(b)),
-                          []() -> void { cudaFree(d_b); });
   CHECK_CUDA_WITH_CLEANUP(cudaMalloc(&d_output, sizeof(output)),
                           []() -> void { cudaFree(d_output); });
   float time_ms_memcpy_in, time_ms_kernel, time_ms_memcpy_out;
@@ -99,12 +98,12 @@ int main() {
   });
   cudaEventRecord(start);
   CHECK_CUDA(cudaMemcpy(d_a, a, sizeof(a), cudaMemcpyHostToDevice));
-  CHECK_CUDA(cudaMemcpy(d_b, b, sizeof(b), cudaMemcpyHostToDevice));
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_memcpy_in, start, stop);
+  global_exit_guard.Register([]() { softmaxDestroy(); });
   cudaEventRecord(start);
-  geam(d_a, d_b, d_output, ROW_NUM, COL_NUM);
+  softmax(d_a, d_output, COL_NUM);
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_kernel, start, stop);
@@ -115,17 +114,21 @@ int main() {
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_memcpy_out, start, stop);
 
-  cublasHandle_t cublas_handle;
-  cublasCreate(&cublas_handle);
+  cudnnHandle_t cudnn;
+  cudnnCreate(&cudnn);
+  global_exit_guard.Register([&cudnn]() { cudnnDestroy(cudnn); });
+  cudnnTensorDescriptor_t cudnn_desc;
+  cudnnCreateTensorDescriptor(&cudnn_desc);
   global_exit_guard.Register(
-      [&cublas_handle]() { cublasDestroy(cublas_handle); });
-  // cublasSetPointerMode(cublas_handle, CUBLAS_POINTER_MODE_DEVICE);
+      [&cudnn_desc]() { cudnnDestroyTensorDescriptor(cudnn_desc); });
+  cudnnSetTensor4dDescriptor(cudnn_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1,
+                             COL_NUM, 1, 1);
   float alpha = 1.0f;
-  float beta = 1.0f;
+  float beta = 0.0f;
   float time_ms_cublas_kernel;
   cudaEventRecord(start);
-  cublasSgeam(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, COL_NUM, ROW_NUM, &alpha,
-              d_a, COL_NUM, &beta, d_b, COL_NUM, d_output, COL_NUM);
+  cudnnSoftmaxForward(cudnn, CUDNN_SOFTMAX_FAST, CUDNN_SOFTMAX_MODE_INSTANCE,
+                      &alpha, cudnn_desc, d_a, &beta, cudnn_desc, d_output);
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_cublas_kernel, start, stop);
@@ -135,13 +138,13 @@ int main() {
   if (compare_result((float*)output, (float*)ground_truth, ROW_NUM, COL_NUM)) {
     std::cout << "ok" << std::endl;
     for (int i = 0; i < 10; ++i) {
-      geam(d_a, d_b, d_output, ROW_NUM, COL_NUM);
+      softmax(d_a, d_output, COL_NUM);
     }
     time_ms_kernel = 0.0f;
     for (int i = 0; i < 100; ++i) {
       float time_ms;
       cudaEventRecord(start);
-      geam(d_a, d_b, d_output, ROW_NUM, COL_NUM);
+      softmax(d_a, d_output, COL_NUM);
       cudaEventRecord(stop);
       cudaEventSynchronize(stop);
       cudaEventElapsedTime(&time_ms, start, stop);
@@ -149,15 +152,17 @@ int main() {
     }
     time_ms_kernel /= 100;
     for (int i = 0; i < 10; ++i) {
-      cublasSgeam(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, COL_NUM, ROW_NUM,
-                  &alpha, d_a, COL_NUM, &beta, d_b, COL_NUM, d_output, COL_NUM);
+      cudnnSoftmaxForward(cudnn, CUDNN_SOFTMAX_FAST,
+                          CUDNN_SOFTMAX_MODE_INSTANCE, &alpha, cudnn_desc, d_a,
+                          &beta, cudnn_desc, d_output);
     }
     time_ms_cublas_kernel = 0.0f;
     for (int i = 0; i < 100; ++i) {
       float time_ms;
       cudaEventRecord(start);
-      cublasSgeam(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, COL_NUM, ROW_NUM,
-                  &alpha, d_a, COL_NUM, &beta, d_b, COL_NUM, d_output, COL_NUM);
+      cudnnSoftmaxForward(cudnn, CUDNN_SOFTMAX_FAST,
+                          CUDNN_SOFTMAX_MODE_INSTANCE, &alpha, cudnn_desc, d_a,
+                          &beta, cudnn_desc, d_output);
       cudaEventRecord(stop);
       cudaEventSynchronize(stop);
       cudaEventElapsedTime(&time_ms, start, stop);
