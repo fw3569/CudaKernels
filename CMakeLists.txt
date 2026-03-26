@@ -18,6 +18,7 @@ add_executable(
   src/kernel/asum_kernel.cu
   src/kernel/geam_kernel.cu
   src/kernel/softmax_kernel.cu
+  src/kernel/layernorm_kernel.cu
 )
 target_include_directories(
   proj

@@ -11,11 +11,12 @@
 #include "asum_kernel.cuh"
 #include "geam_kernel.cuh"
 #include "gemm_kernel.cuh"
+#include "layernorm_kernel.cuh"
 #include "softmax_kernel.cuh"
 #include "transpose_kernel.cuh"
 
 // params for gen test data
-#define ROW_NUM 1
+#define ROW_NUM 1024
 #define COL_NUM (1024 * 32)
 #define MID_NUM 1024
 #define VALUE_MAX 100.0f
@@ -101,9 +102,8 @@ int main() {
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_memcpy_in, start, stop);
-  global_exit_guard.Register([]() { softmaxDestroy(); });
   cudaEventRecord(start);
-  softmax(d_a, d_output, COL_NUM);
+  layernorm(d_a, d_output, ROW_NUM, COL_NUM);
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_kernel, start, stop);
@@ -114,66 +114,27 @@ int main() {
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&time_ms_memcpy_out, start, stop);
 
-  cudnnHandle_t cudnn;
-  cudnnCreate(&cudnn);
-  global_exit_guard.Register([&cudnn]() { cudnnDestroy(cudnn); });
-  cudnnTensorDescriptor_t cudnn_desc;
-  cudnnCreateTensorDescriptor(&cudnn_desc);
-  global_exit_guard.Register(
-      [&cudnn_desc]() { cudnnDestroyTensorDescriptor(cudnn_desc); });
-  cudnnSetTensor4dDescriptor(cudnn_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1,
-                             COL_NUM, 1, 1);
-  float alpha = 1.0f;
-  float beta = 0.0f;
-  float time_ms_cublas_kernel;
-  cudaEventRecord(start);
-  cudnnSoftmaxForward(cudnn, CUDNN_SOFTMAX_FAST, CUDNN_SOFTMAX_MODE_INSTANCE,
-                      &alpha, cudnn_desc, d_a, &beta, cudnn_desc, d_output);
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&time_ms_cublas_kernel, start, stop);
   CHECK_CUDA(cudaMemcpy(ground_truth, d_output, sizeof(ground_truth),
                         cudaMemcpyDeviceToHost));
 
   if (compare_result((float*)output, (float*)ground_truth, ROW_NUM, COL_NUM)) {
     std::cout << "ok" << std::endl;
     for (int i = 0; i < 10; ++i) {
-      softmax(d_a, d_output, COL_NUM);
+      layernorm(d_a, d_output, ROW_NUM, COL_NUM);
     }
     time_ms_kernel = 0.0f;
     for (int i = 0; i < 100; ++i) {
       float time_ms;
       cudaEventRecord(start);
-      softmax(d_a, d_output, COL_NUM);
+      layernorm(d_a, d_output, ROW_NUM, COL_NUM);
       cudaEventRecord(stop);
       cudaEventSynchronize(stop);
       cudaEventElapsedTime(&time_ms, start, stop);
       time_ms_kernel += time_ms;
     }
     time_ms_kernel /= 100;
-    for (int i = 0; i < 10; ++i) {
-      cudnnSoftmaxForward(cudnn, CUDNN_SOFTMAX_FAST,
-                          CUDNN_SOFTMAX_MODE_INSTANCE, &alpha, cudnn_desc, d_a,
-                          &beta, cudnn_desc, d_output);
-    }
-    time_ms_cublas_kernel = 0.0f;
-    for (int i = 0; i < 100; ++i) {
-      float time_ms;
-      cudaEventRecord(start);
-      cudnnSoftmaxForward(cudnn, CUDNN_SOFTMAX_FAST,
-                          CUDNN_SOFTMAX_MODE_INSTANCE, &alpha, cudnn_desc, d_a,
-                          &beta, cudnn_desc, d_output);
-      cudaEventRecord(stop);
-      cudaEventSynchronize(stop);
-      cudaEventElapsedTime(&time_ms, start, stop);
-      time_ms_cublas_kernel += time_ms;
-    }
-    time_ms_cublas_kernel /= 100;
     std::cout << "kernel time : " << time_ms_kernel << "ms, total time: "
               << time_ms_memcpy_in + time_ms_kernel + time_ms_memcpy_out << "ms"
-              << std::endl;
-    std::cout << "cublas kernel time: " << time_ms_cublas_kernel
-              << "ms, rate: " << time_ms_cublas_kernel / time_ms_kernel
               << std::endl;
   } else {
     std::cout << "failed" << std::endl;
